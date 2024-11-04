@@ -4,9 +4,9 @@ folium==0.17.0
 geopy==2.4.1
 langchain==0.3.5
 langchain_google_genai==2.0.3
-numpy==2.1.2
+numpy>=1.26.0, <2.0.0
 pandas==2.2.3
-Pillow==11.0.0
+pillow>=7.1.0,<11 
 plotly==5.23.0
 pvlib==0.11.1
 pydeck==0.9.1
@@ -19,3 +19,4 @@ streamlit==1.37.1
 streamlit_drawable_canvas==0.9.3
 streamlit_extras==0.5.0
 streamlit_folium==0.22.0
+redis==5.2.0

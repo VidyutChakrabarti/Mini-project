@@ -7,36 +7,57 @@ import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
 import random
+import pickle 
+import redis
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 st.set_page_config(layout="wide", page_title='SolarGis', page_icon = 'solargislogo.png')
 from helperfuncs import alter_df
 
-# Initial session state setup
-if 'bbox_coords' not in st.session_state: 
-    st.session_state.bbox_coords = [[79.070953, 21.153387], [79.070953, 21.153637], [79.0712, 21.153637], [79.0712, 21.153387]]
-if 'bbox_center' not in st.session_state: 
-    latitudes = [coord[1] for coord in st.session_state.bbox_coords]
-    longitudes = [coord[0] for coord in st.session_state.bbox_coords]
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
+EXPIRATION_TIME = 1800  
+def set_redis_state(key, value):
+    redis_client.setex(key, EXPIRATION_TIME, pickle.dumps(value))
+
+def get_redis_state(key, default_value=None):
+    value = redis_client.get(key)
+    return pickle.loads(value) if value else default_value
+
+if get_redis_state("bbox_coords") is None:
+    set_redis_state("bbox_coords", [[79.070953, 21.153387], [79.070953, 21.153637], [79.0712, 21.153637], [79.0712, 21.153387]])
+
+if get_redis_state("bbox_center") is None:
+    bbox_coords = get_redis_state("bbox_coords")
+    latitudes = [coord[1] for coord in bbox_coords]
+    longitudes = [coord[0] for coord in bbox_coords]
     avg_lat = sum(latitudes) / len(latitudes)
     avg_lon = sum(longitudes) / len(longitudes)
-    st.session_state.bbox_center = [avg_lon, avg_lat]
-if 'drawing_mode' not in st.session_state:
-    st.session_state.drawing_mode = "Bounding Box"
-if 'annotations' not in st.session_state:
-    st.session_state.annotations = []
-if 'upis' not in st.session_state: 
-    st.session_state.upis = ["sampleimages/1north.jpeg", "sampleimages/3west-left.jpeg", "sampleimages/5south-left.jpeg", "sampleimages/7east-left.jpeg"]
-if 'bbox_confirmed' not in st.session_state:
-    st.session_state.bbox_confirmed = False
-if 'rectangle_drawn' not in st.session_state:
-    st.session_state.rectangle_drawn = False
-if 'line_drawn' not in st.session_state:
-    st.session_state.line_drawn = False
-if 'new_box' not in st.session_state: 
-    st.session_state.new_box = None
-if 'dt4' not in st.session_state: 
-    st.session_state.dt4 = None
+    set_redis_state("bbox_center", [avg_lon, avg_lat])
+
+if get_redis_state("drawing_mode") is None:
+    set_redis_state("drawing_mode", "Bounding Box")
+
+if get_redis_state("annotations") is None:
+    set_redis_state("annotations", [])
+
+if get_redis_state("upis") is None:
+    set_redis_state("upis", ["sampleimages/1north.jpeg", "sampleimages/3west-left.jpeg", "sampleimages/5south-left.jpeg", "sampleimages/7east-left.jpeg"])
+
+if get_redis_state("bbox_confirmed") is None:
+    set_redis_state("bbox_confirmed", False)
+
+if get_redis_state("rectangle_drawn") is None:
+    set_redis_state("rectangle_drawn", False)
+
+if get_redis_state("line_drawn") is None:
+    set_redis_state("line_drawn", False)
+
+if get_redis_state("new_box") is None:
+    set_redis_state("new_box", None)
+
+if get_redis_state("dt4") is None:
+    set_redis_state("dt4", None)
+
 
 def random_color():
     colors = {
@@ -48,12 +69,12 @@ def random_color():
     }
     return random.choice(list(colors.values()))
 
-# Function to reset session state for the next round of annotation
-def reset_session_state():
-    st.session_state.bbox_confirmed = False
-    st.session_state.rectangle_drawn = False
-    st.session_state.line_drawn = False
-    st.session_state.drawing_mode = "Bounding Box"
+def reset_redis_state():
+    set_redis_state("bbox_confirmed", False)
+    set_redis_state("rectangle_drawn", False)
+    set_redis_state("line_drawn", False)
+    set_redis_state("drawing_mode", "Bounding Box")
+
 
 # Sidebar description
 st.sidebar.markdown('<h1 class="gradient-text">Image Annotation for Height Estimation (East)</h1><hr class="gradient-line"><br>', unsafe_allow_html=True)
@@ -73,62 +94,68 @@ c1, c2 = st.columns([1, 1])
 # Display map and select bounding box coordinates in Column 2
 with c2:
     st.write("**Step 1: Select Bounding Box on Map**")
-    m = folium.Map(location=[st.session_state.bbox_center[1], st.session_state.bbox_center[0]], zoom_start=18, tiles=None)
+    m = folium.Map(location=[get_redis_state("bbox_center")[1], get_redis_state("bbox_center")[0]],zoom_start=18,tiles=None)
     folium.TileLayer(tiles="https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", attr='Google', name='Google Dark', max_zoom=21, subdomains=['mt0', 'mt1', 'mt2', 'mt3']).add_to(m)
     draw = Draw(draw_options={"rectangle": True, "polygon": False, "circle": False, "marker": False, "polyline": False}, edit_options={"edit": True})
     draw.add_to(m)
-    folium.Polygon(locations=[(coord[1], coord[0]) for coord in st.session_state.bbox_coords], color="blue", fill=True, fill_opacity=0.2).add_to(m)
+    folium.Polygon(locations=[(coord[1], coord[0]) for coord in  get_redis_state("bbox_coords")], color="blue", fill=True, fill_opacity=0.2).add_to(m)
     output = st_folium(m, width=530, height=400)
     if st.button("Confirm Bounding Box", key="confirm_bbox"):
-        st.session_state.bbox_confirmed = True
-        st.session_state.new_box = output["all_drawings"][-1]["geometry"]["coordinates"]
-        st.session_state.drawing_mode = "Rectangle"
+        set_redis_state("bbox_confirmed", True)
+        set_redis_state("new_box", output["all_drawings"][-1]["geometry"]["coordinates"])
+        set_redis_state("drawing_mode", "Rectangle")
 
 
 with c1:
-    image = Image.open(st.session_state.upis[3])  
+    image = Image.open(get_redis_state("upis")[3])  
     canvas_result = st_canvas(
         fill_color=random_color(),
         stroke_width=2,
         stroke_color="#000",
         background_image=image,
         update_streamlit=True,
-        drawing_mode="rect" if st.session_state.drawing_mode == "Rectangle" else "line",
+        drawing_mode="rect" if get_redis_state("drawing_mode")  == "Rectangle" else "line",
         width=530,
         key="canvas",
     )
 
     # Rectangle submission
-    if st.button("Select Object", key="submit_rect", disabled=(not st.session_state.bbox_confirmed or st.session_state.drawing_mode != "Rectangle")):
+    if st.button("Select Object", key="submit_rect", disabled=(not get_redis_state("bbox_confirmed") or get_redis_state("drawing_mode") != "Rectangle")):
         if canvas_result.json_data:
             rect_df = pd.json_normalize(canvas_result.json_data["objects"])
-            st.session_state.annotations.append({"bbox_coords": st.session_state.new_box, "rect_height": rect_df['height'].iloc[-1]})
-            st.session_state.rectangle_drawn = True
-            st.session_state.drawing_mode = "Line"  # Shift to line drawing
+            annotations = get_redis_state("annotations", [])
+            annotations.append({"bbox_coords": get_redis_state("new_box"), "rect_height": rect_df['height'].iloc[-1]})
+            set_redis_state("annotations", annotations)
+            set_redis_state("rectangle_drawn", True)
+            set_redis_state("drawing_mode", "Line")  # Shift to line drawing
             st.rerun()
 
     # Line submission
-    if st.button("Submit reference Line", key="submit_line", disabled=(not st.session_state.rectangle_drawn or st.session_state.drawing_mode != "Line")):
+    if st.button("Submit reference Line", key="submit_line", disabled=(not get_redis_state("rectangle_drawn") or get_redis_state("drawing_mode") != "Line")):
         if canvas_result.json_data:
             line_df = pd.json_normalize(canvas_result.json_data["objects"])
-            st.session_state.annotations[-1]["line_height"] = line_df['height'].iloc[-1]       
-            st.session_state.line_drawn = True
-            reset_session_state() 
+            annotations = get_redis_state("annotations", [])
+            annotations[-1]["line_height"] = line_df['height'].iloc[-1]
+            set_redis_state("annotations", annotations)
+            set_redis_state("line_drawn", True)
+            reset_redis_state()
             st.rerun() 
 
 
 with st.form(key='df'): 
     st.write("**Collected Annotations:**")
-    if st.session_state.annotations:
-        st.dataframe(pd.DataFrame(st.session_state.annotations))
+    annotations = get_redis_state("annotations", default_value=[])
+    if annotations:
+        st.dataframe(pd.DataFrame(annotations))
     next_page = st.form_submit_button('Next Page')
     if next_page:
-        st.session_state.annotations = pd.DataFrame(st.session_state.annotations)
-        st.session_state.dt4 = alter_df(st.session_state.annotations)
-        st.session_state.new_box = None
-        st.session_state.annotations = []
-        reset_session_state()
+        annotations_df = pd.DataFrame(get_redis_state("annotations"))
+        set_redis_state("dt4", alter_df(annotations_df))
+        set_redis_state("new_box", None)
+        set_redis_state("annotations", [])  
+        reset_redis_state()
         switch_page('estimate')
+
 
 
 # Page styling

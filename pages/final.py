@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 import os
+import redis
+import pickle
 
 load_dotenv()
 api_key = os.getenv('SOLCAST_API_KEY')
@@ -37,13 +39,24 @@ youtube_code = '''
   </iframe>
 </div>
 '''
-if 'infer' not in st.session_state:
-    st.session_state.infer = True
-if 'res' not in st.session_state: 
-    st.session_state.res = None
 
-if 'combined_df' not in st.session_state:
-    st.session_state.combined_df = pd.DataFrame({
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
+EXPIRATION_TIME = 1800  
+def set_redis_state(key, value):
+    redis_client.setex(key, EXPIRATION_TIME, pickle.dumps(value))
+
+def get_redis_state(key, default_value=None):
+    value = redis_client.get(key)
+    return pickle.loads(value) if value else default_value
+
+if get_redis_state('infer') is None:
+    set_redis_state('infer', True)
+
+if get_redis_state('res') is None:
+    set_redis_state('res', None)
+
+if get_redis_state('combined_df') is None:
+    combined_df = pd.DataFrame({
         'latitudes': [
             [28.613092, 28.613215, 28.613215, 28.613092],  
             [28.613092, 28.613215, 28.613215, 28.613092],   
@@ -60,17 +73,23 @@ if 'combined_df' not in st.session_state:
         ],
         'estimated_height': [0, 10.2, 9.8, 8.5, 24.5]  # Heights of structures
     })
-if 'response_radiation' not in st.session_state:
-    st.session_state.response_radiation = radiance_data
-if 'response_pv_power' not in st.session_state:
-    st.session_state.response_pv_power = pv_data
-if 'npanels' not in st.session_state: 
-    st.session_state.npanels = 12
+    set_redis_state('combined_df', combined_df)
 
-combined_df = st.session_state.combined_df
 
-if 'bbox_center' not in st.session_state:
-    st.session_state.bbox_center = [77.210643,28.613215]
+if get_redis_state('response_radiation') is None:
+    set_redis_state('response_radiation', radiance_data)
+
+if get_redis_state('response_pv_power') is None:
+    set_redis_state('response_pv_power', pv_data)
+
+if get_redis_state('npanels') is None:
+    set_redis_state('npanels', 12)
+
+combined_df = get_redis_state('combined_df')
+
+if get_redis_state('bbox_center') is None:
+    set_redis_state('bbox_center', [77.210643, 28.613215])
+
 
 # Function to generate random colors for each building
 def generate_color():
@@ -108,8 +127,10 @@ layer = pdk.Layer(
 
 # Set the view to initial location and zoom level, with fixed pitch and bearing
 view_state = pdk.ViewState(
-    latitude=st.session_state.bbox_center[1],  
-    longitude=st.session_state.bbox_center[0],  
+    bbox_center = get_redis_state('bbox_center', [77.210643, 28.613215]),  # Default values
+    # Set latitude and longitude using the retrieved bbox_center
+    latitude = bbox_center[1],
+    longitude = bbox_center[0],  
     zoom=18,
     pitch=45,  
     bearing=290,  
@@ -129,12 +150,20 @@ if restart:
 c1, c2= st.columns([0.9,1])
 with c1:
     with st.form(key='redraw'):
-        st.write("**Double click cells to change estiamted heights of obstacles:**") 
-        st.session_state.combined_df = st.data_editor(st.session_state.combined_df)
+        st.write("**Double click cells to change estimated heights of obstacles:**")
+
+        # Retrieve combined_df from Redis or use default if it doesn't exist
+        combined_df = get_redis_state('combined_df', pd.DataFrame())  # Default to an empty DataFrame if not set
+        combined_df = st.data_editor(combined_df)  # Allow editing in the data editor
+
+        set_redis_state('combined_df', combined_df)
+
         redraw = st.form_submit_button('Change estimated heights')
         if redraw:
-            st.session_state.infer = True 
+            # Set infer flag in Redis
+            set_redis_state('infer', True)
             st.rerun()
+
     st.write(youtube_code, unsafe_allow_html=True)
 
 # Function to determine UTM zone based on longitude
@@ -143,8 +172,7 @@ def get_utm_zone(longitude):
     zone_number = int((longitude + 180) / 6) + 1
     return zone_number
 
-# Load DataFrame from session state
-df = st.session_state.combined_df
+df = get_redis_state("combined_df")
 
 main_building = df.iloc[0]
 obstacles = df.iloc[1:]
@@ -342,7 +370,8 @@ with col2:
 
 with col1:
     with st.form('solar'):
-        data_pv = st.session_state.response_pv_power['estimated_actuals']
+        response_pv_power = get_redis_state('response_pv_power')
+        data_pv = response_pv_power['estimated_actuals']
         times_pv = [
             (datetime.strptime(entry["period_end"], "%Y-%m-%dT%H:%M:%S.%f0Z") + timedelta(hours=5, minutes=30)).strftime('%H:%M')
             for entry in data_pv
@@ -357,7 +386,8 @@ with col1:
         )
 
         # Slide 2 Data Preparation: Radiation
-        data_rad = st.session_state.response_radiation['estimated_actuals']
+        response_radiation = get_redis_state('response_radiation')
+        data_rad = response_radiation['estimated_actuals']
         times_rad = [
             (datetime.strptime(entry["period_end"], "%Y-%m-%dT%H:%M:%S.%f0Z") + timedelta(hours=5, minutes=30)).strftime('%H:%M')
             for entry in data_rad
@@ -433,19 +463,23 @@ with col1:
 
         refetch = st.form_submit_button('Re-Fetch')
         if refetch:
-            lati = st.session_state.bbox_center[1]
-            longi = st.session_state.bbox_center[0]
+            bbox_center = get_redis_state('bbox_center', default_value=[77.210643, 28.613215])
+
+            # Assign latitude and longitude
+            lati = bbox_center[1]
+            longi = bbox_center[0]
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                response_radiation, response_pv_power = loop.run_until_complete(main_fetch(lati, longi, api_key,int(st.session_state.npanels)))
+                response_radiation, response_pv_power = loop.run_until_complete(main_fetch(lati, longi, api_key,int(get_redis_state('npanels', 12))))
                 resp = response_pv_power['estimated_actauls']
             except Exception as e:
                 st.error('Error fetching data from APIs')
                 response_radiation, response_pv_power = None, None
             if response_pv_power and response_radiation:    
-                st.session_state.response_radiation = response_radiation
-                st.session_state.response_pv_power = response_pv_power
+                set_redis_state('response_radiation', response_radiation)
+                set_redis_state('response_pv_power', response_pv_power)
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
@@ -461,13 +495,16 @@ prompt_template = PromptTemplate(
 )
 
 def infer(pv_data):
-    if st.session_state.infer:
-        st.session_state.res = llm.invoke(prompt_template.format(pv_data=pv_data))
-        st.session_state.infer = False
-    st.sidebar.text_area('AI generated Inference:',st.session_state.res.content, height=450)
+    if get_redis_state('infer', default_value=True):
+        result = llm.invoke(prompt_template.format(pv_data=pv_data))
+        set_redis_state('res', result)
+        set_redis_state('infer', False)
+    inference_result = get_redis_state('res', default_value="")
+    st.sidebar.text_area('AI generated Inference:', inference_result.content, height=450)
 with st.sidebar:
     with st.spinner('AI will respond shortly...'):
-        infer(adjusted_df_pv) 
+        infer(adjusted_df_pv)
+
 
 
 
@@ -477,4 +514,3 @@ with st.sidebar:
     
         
             
-

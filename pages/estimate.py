@@ -6,22 +6,43 @@ import folium
 from data import *
 from helperfuncs import combine_dataframes
 import pandas as pd
+import redis
+import pickle
+
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
+EXPIRATION_TIME = 1800  
+
+def set_redis_state(key, value):
+    redis_client.setex(key, EXPIRATION_TIME, pickle.dumps(value))
+
+def get_redis_state(key, default_value=None):
+    value = redis_client.get(key)
+    return pickle.loads(value) if value else default_value
 
 st.set_page_config(layout="wide", page_title='SolarGis', page_icon = 'solargislogo.png')
 with open("est_style.css") as f:
     st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-if 'bbox_center' not in st.session_state: 
-    st.session_state.bbox_center = [79.0729, 21.1537]
-if 'segmented_images' not in st.session_state: 
-    st.session_state.segmented_images = []
+
+if get_redis_state("bbox_center") is None:
+    set_redis_state("bbox_center", [79.0729, 21.1537])
+
+if get_redis_state("segmented_images") is None:
+    set_redis_state("segmented_images", [])
+
 
 directions = ['North', 'West','South','East']
-if len(st.session_state.segmented_images)==4:
-    images=[]
-    for i,img in enumerate(st.session_state.segmented_images): 
+
+segmented_images = get_redis_state("segmented_images", [])
+descriptions = get_redis_state("descriptions", [])
+if len(segmented_images) == 4:
+    images = []
+    for i, img in enumerate(segmented_images): 
         images.append({
-            'path': img, 'title': directions[i], 'desc':f'<b>AUTO OBJECT DETECTION:</b><br><br>{st.session_state.descriptions[i]}'
+            'path': img, 
+            'title': directions[i], 
+            'desc': f'<b>AUTO OBJECT DETECTION:</b><br><br>{descriptions[i]}'
         })
+
 
 else: 
     images = [
@@ -43,8 +64,12 @@ if st.sidebar.button("Reselect Obstacles", use_container_width=True):
 
 
 st.sidebar.write("Your selected bounding box:")
-m = folium.Map(location=[st.session_state.bbox_center[1], st.session_state.bbox_center[0]], zoom_start=14)
-folium.Marker([st.session_state.bbox_center[1], st.session_state.bbox_center[0]], popup="Location").add_to(m)
+bbox_center = get_redis_state("bbox_center", [79.0729, 21.1537])  
+
+# Create the Folium map using the bbox_center coordinates
+m = folium.Map(location=[bbox_center[1], bbox_center[0]], zoom_start=14)
+folium.Marker([bbox_center[1], bbox_center[0]], popup="Location").add_to(m)
+
 with st.sidebar:
     st_folium(m, width=300, height=200)
 
@@ -64,124 +89,170 @@ def preload_cards(images):
         cards.append(card_html)
     return cards
 
-if 'cards' not in st.session_state:
-    st.session_state.cards = preload_cards(images)
+if get_redis_state("cards") is None:
+    set_redis_state("cards", preload_cards(images))
 
-if 'start_index' not in st.session_state:
-    st.session_state.start_index = 0
+if get_redis_state("start_index") is None:
+    set_redis_state("start_index", 0)
 
-if 'animation_class' not in st.session_state:
-    st.session_state.animation_class = [""] * len(st.session_state.cards)
+if get_redis_state("animation_class") is None:
+    set_redis_state("animation_class", [""] * len(get_redis_state("cards")))
 
-if 'direction' not in st.session_state:
-    st.session_state.direction = ''
+if get_redis_state("direction") is None:
+    set_redis_state("direction", '')
 
-if 'combined_df' not in st.session_state: 
-    st.session_state.combined_df = None
-
-def update_animation_classes(direction):
+if get_redis_state("combined_df") is None:
+    set_redis_state("combined_df", None)
     
+def update_animation_classes(direction):
+    cards = get_redis_state("cards")
+    start_index = get_redis_state("start_index")
+
     if direction == 'left':
-        st.session_state.animation_class = ["card-slide-left"] * len(st.session_state.cards)
-        st.session_state.animation_class[(st.session_state.start_index)] = 'card-slide-out-to-left'
-        st.session_state.animation_class[(st.session_state.start_index + 3) % len(st.session_state.cards)] = 'card-slide-in-from-right'
-        #print((st.session_state.start_index),(st.session_state.start_index + 3) % len(st.session_state.cards))
+        animation_class = ["card-slide-left"] * len(cards)
+        animation_class[start_index] = 'card-slide-out-to-left'
+        animation_class[(start_index + 3) % len(cards)] = 'card-slide-in-from-right'
     elif direction == 'right':
-        st.session_state.animation_class = ["card-slide-right"] * len(st.session_state.cards)
-        st.session_state.animation_class[(st.session_state.start_index+len(st.session_state.cards)-1) % len(st.session_state.cards)] = 'card-slide-in-from-left'
-        st.session_state.animation_class[(st.session_state.start_index+2)% len(st.session_state.cards)] = 'card-slide-out-to-right'
-        #print((st.session_state.start_index + 3) % len(st.session_state.cards),(st.session_state.start_index+2)% len(st.session_state.cards))
+        animation_class = ["card-slide-right"] * len(cards)
+        animation_class[(start_index + len(cards) - 1) % len(cards)] = 'card-slide-in-from-left'
+        animation_class[(start_index + 2) % len(cards)] = 'card-slide-out-to-right'
+
+    set_redis_state("animation_class", animation_class)
+
 
 col1, col2= st.columns([1,1])
 with col1:
     left = st.button('◀ Shift left', use_container_width=True)
     if left:
         update_animation_classes('left')
-        st.session_state.direction = 'left'
-
+        set_redis_state('direction', 'left') 
 with col2:
     right = st.button('Shift Right ▶', use_container_width=True)
     if right:
         update_animation_classes('right')
-        st.session_state.start_index = (st.session_state.start_index) % len(st.session_state.cards)
-        st.session_state.direction = 'right'
+        
+        start_index = get_redis_state('start_index', 0) 
+        new_start_index = start_index % len(get_redis_state('cards', []))  
+        set_redis_state('start_index', new_start_index) 
+        
+        set_redis_state('direction', 'right') 
 
-if st.session_state.direction == 'left':
+direction = get_redis_state("direction")
+start_index = get_redis_state("start_index")
+cards = get_redis_state("cards")
+animation_class = get_redis_state("animation_class")
+
+if direction == 'left':
     cols = st.columns(3)
     placeholders = [col.empty() for col in cols]
     
     for i in range(3):
-        card_index = (st.session_state.start_index + i) % len(st.session_state.cards)
-        card_class = st.session_state.animation_class[card_index]
-        placeholders[i].markdown(f'<div class="{card_class}">{st.session_state.cards[card_index]}</div>', unsafe_allow_html=True)
+        card_index = (start_index + i) % len(cards)
+        card_class = animation_class[card_index]
+        placeholders[i].markdown(f'<div class="{card_class}">{cards[card_index]}</div>', unsafe_allow_html=True)
+    
     time.sleep(0.5)
     
-    st.session_state.start_index = (st.session_state.start_index + 1) % len(st.session_state.cards)
+    start_index = (start_index + 1) % len(cards)
     
     for i in range(3):
-        card_index = (st.session_state.start_index + i) % len(st.session_state.cards)
-        card_class = st.session_state.animation_class[card_index]
+        card_index = (start_index + i) % len(cards)
+        card_class = animation_class[card_index]
         if card_class == "card-slide-left":
             card_class = ""
-        placeholders[i].markdown(f'<div class="{card_class}">{st.session_state.cards[card_index]}</div>', unsafe_allow_html=True)
-    st.session_state.direction = ''
-    st.session_state.animation_class = [""] * len(st.session_state.cards)
-    
-
-elif st.session_state.direction == 'right':
+        placeholders[i].markdown(f'<div class="{card_class}">{cards[card_index]}</div>', unsafe_allow_html=True)
+    set_redis_state("direction", '')
+    set_redis_state("animation_class", [""] * len(cards))
+    set_redis_state("start_index", start_index)
+     
+elif direction == 'right':
     cols = st.columns(3)
     placeholders = [col.empty() for col in cols]
-    
+
     for i in range(3):
-        card_index = (st.session_state.start_index + i) % len(st.session_state.cards)
-        card_class = st.session_state.animation_class[card_index]
-        placeholders[i].markdown(f'<div class="{card_class}">{st.session_state.cards[card_index]}</div>', unsafe_allow_html=True)
+        card_index = (start_index + i) % len(cards)
+        card_class = animation_class[card_index]
+        placeholders[i].markdown(f'<div class="{card_class}">{cards[card_index]}</div>', unsafe_allow_html=True)
+    
     time.sleep(0.5)
-    
-    st.session_state.start_index = (st.session_state.start_index - 1) % len(st.session_state.cards)
+    start_index = (start_index - 1) % len(cards)
     
     for i in range(3):
-        card_index = (st.session_state.start_index + i) % len(st.session_state.cards)
-        card_class = st.session_state.animation_class[card_index]
+        card_index = (start_index + i) % len(cards)
+        card_class = animation_class[card_index]
         if card_class == "card-slide-right":
             card_class = ""
-        placeholders[i].markdown(f'<div class="{card_class}">{st.session_state.cards[card_index]}</div>', unsafe_allow_html=True)
-    st.session_state.direction = ''
-    st.session_state.animation_class = [""] * len(st.session_state.cards)
+        placeholders[i].markdown(f'<div class="{card_class}">{cards[card_index]}</div>', unsafe_allow_html=True) 
+    # Resetting direction and animation class
+    set_redis_state("direction", '')
+    set_redis_state("animation_class", [""] * len(cards))
+    set_redis_state("start_index", start_index)
+    
+
+
     
 else:
     cols = st.columns(3)
+    start_index = get_redis_state("start_index")
+    cards = get_redis_state("cards")
+    animation_class = get_redis_state("animation_class")
+
     for i in range(3):
-        card_index = (st.session_state.start_index + i) % len(st.session_state.cards)
-        card_class = st.session_state.animation_class[card_index]
+        card_index = (start_index + i) % len(cards)
+        card_class = animation_class[card_index]
         with cols[i]:
-            st.markdown(f'<div class="{card_class}">{st.session_state.cards[card_index]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="{card_class}">{cards[card_index]}</div>', unsafe_allow_html=True)
+
 
 st.divider()
-with st.form(key = 'df'):
+dt1 = get_redis_state("dt1") or pd.DataFrame()  
+dt2 = get_redis_state("dt2") or pd.DataFrame()  
+dt3 = get_redis_state("dt3") or pd.DataFrame()  
+dt4 = get_redis_state("dt4") or pd.DataFrame()  
+bbox_coords = get_redis_state("bbox_coords") or []  
+
+with st.form(key='df'):
     st.write("**Manually selected objects and their estimated heights.** (Double click on cells for editing the dataframes)") 
-    expand = st.expander("Explainations") 
-    expand.write("▶ The heights & widths of the objects will be used to calculate the total shadow area that could be casted by an obstacle.")
-    expand.write("▶ Based upon the direction in which the object is situated respective to the site in consideration, we adjust the shadow dimensions automatically and recalculate total pv output based on partial shading.")
-    c1, c2 = st.columns([1,1])  
+    expand = st.expander("Explanations") 
+    expand.write("▶ The heights & widths of the objects will be used to calculate the total shadow area that could be cast by an obstacle.")
+    expand.write("▶ Based upon the direction in which the object is situated respective to the site in consideration, we adjust the shadow dimensions automatically and recalculate total PV output based on partial shading.")
+    
+    c1, c2 = st.columns([1, 1])  
+    
     with c1:      
         st.write("North:")
-        st.session_state.dt1 = st.data_editor(st.session_state.dt1)
+        dt1 = st.data_editor(dt1)
+        set_redis_state("dt1", dt1)  
+
         st.write("West:")
-        st.session_state.dt2 = st.data_editor(st.session_state.dt2)
+        dt2 = st.data_editor(dt2)
+        set_redis_state("dt2", dt2)  
+
     with c2:  
         st.write("South:")
-        st.session_state.dt3 = st.data_editor(st.session_state.dt3)
+        dt3 = st.data_editor(dt3)
+        set_redis_state("dt3", dt3)  
+
         st.write("East:")
-        st.session_state.dt4 = st.data_editor(st.session_state.dt4)
+        dt4 = st.data_editor(dt4)
+        set_redis_state("dt4", dt4)  
+
     re_estimate = st.form_submit_button("Re-Estimate Solar prediction", use_container_width=True)
     
     if re_estimate:
-        st.session_state.bbox_coords = [[st.session_state.bbox_coords]]
-        main_df = pd.DataFrame({'bbox_coords': st.session_state.bbox_coords, 'rect_height': 230, 'line_height': 46, 'estimated_height': 0})
-        st.session_state.combined_df = combine_dataframes([main_df, st.session_state.dt1, st.session_state.dt2, st.session_state.dt3, st.session_state.dt4])
-        switch_page('final')
-
+        bbox_coords = [[bbox_coords]]  # Update bbox_coords as needed
+        main_df = pd.DataFrame({
+            'bbox_coords': bbox_coords,
+            'rect_height': 230,
+            'line_height': 46,
+            'estimated_height': 0
+        })
+        
+        combined_df = combine_dataframes([main_df, dt1, dt2, dt3, dt4])
+        set_redis_state("combined_df", combined_df)  
+        set_redis_state("bbox_coords", bbox_coords)  
+        
+        switch_page('final')  # Navigate to final page
 
 
 

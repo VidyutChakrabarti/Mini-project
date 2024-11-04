@@ -16,6 +16,8 @@ from PIL import Image, ImageDraw
 import random
 import threading
 from streamlit.runtime.scriptrunner import add_script_run_ctx
+import redis 
+import pickle
 
 st.set_page_config(layout="wide", page_title='SolarGis', page_icon = 'solargislogo.png')
 load_dotenv()
@@ -26,21 +28,32 @@ headers = {
     "Token": os.getenv('DINO_TOKEN')
 }
 
-if 'descriptions' not in st.session_state: 
-    st.session_state.descriptions = []
-if 'bbox_center' not in st.session_state: 
-    st.session_state.bbox_center = [79.0710765, 21.153512]
-if 'response_radiation' not in st.session_state: 
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=False)
+EXPIRATION_TIME = 1800  # 30 minutes
+
+def set_redis_state(key, value):
+    redis_client.setex(key, EXPIRATION_TIME, pickle.dumps(value))
+
+def get_redis_state(key, default_value=None):
+    value = redis_client.get(key)
+    return pickle.loads(value) if value else default_value
+
+
+if get_redis_state("descriptions") is None:
+    set_redis_state("descriptions", [])
+if get_redis_state("bbox_center") is None:
+    set_redis_state("bbox_center", [79.0710765, 21.153512])
+if get_redis_state("response_radiation") is None:
     st.warning("Your bounding box has changed. Kindly reselect.")
-    st.session_state.response_radiation = radiance_data
-if 'response_pv_power' not in st.session_state:
-    st.session_state.response_pv_power = pv_data
-if 'dsb2' not in st.session_state:
-    st.session_state.dsb2 = True
-if 'segmented_images' not in st.session_state:
-    st.session_state.segmented_images = []
-if 'upis' not in st.session_state: 
-    st.session_state.upis = []
+    set_redis_state("response_radiation", radiance_data)
+if get_redis_state("response_pv_power") is None:
+    set_redis_state("response_pv_power", pv_data)
+if get_redis_state("dsb2") is None:
+    set_redis_state("dsb2", True)
+if get_redis_state("segmented_images") is None:
+    set_redis_state("segmented_images", [])
+if get_redis_state("upis") is None:
+    set_redis_state("upis", [])
 
 # Helper functions
 def upload_to_imgbb(image_path, api_key=os.getenv('IMGDB_API_KEY')):
@@ -72,7 +85,9 @@ def draw_boxes(image_path, results):
         draw.rectangle(bbox, outline=color, width=2)
         draw.text((bbox[0], bbox[1]), label, fill=color)
     description = '<br>'.join([f'{cat}: {count}' for cat, count in category_counts.items()])
-    st.session_state.descriptions.append(description)
+    descriptions = get_redis_state("descriptions")
+    descriptions.append(description)
+    set_redis_state("descriptions", descriptions)
     return image
 
 def object_detect(image_url, image_save_path): 
@@ -111,7 +126,10 @@ def object_detect(image_url, image_save_path):
             image_with_boxes = draw_boxes(image_save_path, results)
             image_with_boxes.save(image_save_path)
             url = upload_to_imgbb(image_save_path)
-            st.session_state.segmented_images.append(url)
+            segmented_images = get_redis_state("segmented_images", [])
+            segmented_images.append(url)
+            set_redis_state("segmented_images", segmented_images)
+
 
 def process_image(uploaded_image, unique_id):
     file_path = f"temp_{unique_id}_{uploaded_image.name}"
@@ -171,15 +189,18 @@ if go_back:
     switch_page('main')
 
 st.sidebar.write("Your selected bounding box:")
-m = folium.Map(location=[st.session_state.bbox_center[1], st.session_state.bbox_center[0]], zoom_start=14)
-folium.Marker([st.session_state.bbox_center[1], st.session_state.bbox_center[0]], popup="Location").add_to(m)
+bbox_center = get_redis_state("bbox_center")
+m = folium.Map(location=[bbox_center[1], bbox_center[0]], zoom_start=14)
+folium.Marker([bbox_center[1], bbox_center[0]], popup="Location").add_to(m)
+
 with st.sidebar:
     st_folium(m, width=300, height=200)
 
 with left_col:
     with st.form(key="calc"):
         st.markdown('<div class="container">Initial PV Output</div>', unsafe_allow_html=True)
-        data = st.session_state.response_pv_power['estimated_actuals']
+        response_pv_power = get_redis_state("response_pv_power", pv_data)
+        data = response_pv_power['estimated_actuals']
         times = [(datetime.strptime(entry["period_end"], "%Y-%m-%dT%H:%M:%S.%f0Z") + timedelta(hours=5, minutes=30)).strftime('%H:%M') for entry in data]
         pv_estimates = [entry["pv_estimate"] for entry in data]
         
@@ -211,7 +232,9 @@ with left_col:
 with right_col:
     with st.form(key="graph"):
         st.markdown('<div class="container">Solar Irradiance Data</div>', unsafe_allow_html=True)
-        data = st.session_state.response_radiation['estimated_actuals']
+        response_radiation = get_redis_state("response_radiation", radiance_data)
+        data = response_radiation['estimated_actuals']
+
         times = [(datetime.strptime(entry["period_end"], "%Y-%m-%dT%H:%M:%S.%f0Z") + timedelta(hours=5, minutes=30)).strftime('%H:%M') for entry in data]
         ghi_values = [entry["ghi"] for entry in data]
         df = pd.DataFrame({'Time': times, 'GHI': ghi_values})
@@ -244,9 +267,9 @@ with col1:
         st.selectbox("Type of image:", ['LiDar(Iphone)', 'Stereo']) 
         upload_image = st.form_submit_button("Upload Images", use_container_width=True)
         if upload_image and len(uploaded_images)==4: 
-            st.session_state.dsb2 = False
+            set_redis_state("dsb2", False)
         else: 
-            st.session_state.dsb2 = True
+            set_redis_state("dsb2", True)
 
 with col2: 
     with st.form(key = 'uploaded_images'): 
@@ -262,14 +285,10 @@ with col2:
                         placeholders.append(st.image(uploaded_images[i], use_column_width=True))
                     else:
                         placeholders.append(st.image(placeholder_image_url, use_column_width=True))
-        segment = st.form_submit_button("Segment", use_container_width=True, disabled=st.session_state.dsb2, help="Upload all images first.")
+        segment = st.form_submit_button("Segment", use_container_width=True, disabled=get_redis_state("dsb2"), help="Upload all images first.")
         if segment and len(uploaded_images) == 4: 
             with st.spinner("Restrain from re-freshing while we segment your images..."):
-                # st.session_state.segmented_images = []
-                # threaded_process_images(uploaded_images)
-                # if len(st.session_state.segmented_images) == 4:
-                #     print(st.session_state.segmented_images)
-                    st.session_state.upis = uploaded_images
+                    set_redis_state("upis", uploaded_images)
                     switch_page('North')
 
 if not upload_image and len(uploaded_images) != 4:
